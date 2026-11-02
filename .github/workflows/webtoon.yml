@@ -1,0 +1,119 @@
+name: Webtoon
+
+on:
+  push:
+    paths:
+      - "chapters/**.txt"
+  workflow_dispatch:
+    inputs:
+      chapter:
+        description: "Path to a chapter .txt in this repo (e.g. chapters/ch01.txt)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webtoon-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  webtoon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ARK_API_KEY: ${{ secrets.ARK_API_KEY }}
+      ARK_IMAGE_MODEL: ${{ vars.ARK_IMAGE_MODEL }}
+      WEBTOON_MODEL: ${{ vars.WEBTOON_MODEL }}
+      SCRIPTS: plugins/novel-to-manga-anime-generator/skills/novel-to-manga-anime-generator/scripts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-webtoon.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-webtoon.txt
+          sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk
+
+      - name: Check secrets
+        run: |
+          missing=""
+          [ -n "$ANTHROPIC_API_KEY" ] || missing="$missing ANTHROPIC_API_KEY"
+          [ -n "$ARK_API_KEY" ] || missing="$missing ARK_API_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Add these repository secrets (Settings > Secrets and variables > Actions):$missing"
+            exit 1
+          fi
+
+      - name: Pick chapters
+        id: pick
+        env:
+          INPUT_CHAPTER: ${{ inputs.chapter }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            printf '%s\n' "$INPUT_CHAPTER" > chapters.list
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            git diff-tree --no-commit-id --name-only --diff-filter=AM -r HEAD -- 'chapters/*.txt' > chapters.list
+          else
+            git diff --name-only --diff-filter=AM "$BEFORE" HEAD -- 'chapters/*.txt' > chapters.list
+          fi
+          cat chapters.list
+          [ -s chapters.list ] || echo "No chapter files changed."
+
+      - name: Generate
+        run: |
+          status=0
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in *..*) echo "::error::Not a chapter file: $file"; status=1; continue;; chapters/*.txt) ;; *) echo "::error::Not a chapter file: $file"; status=1; continue;; esac
+            [ -f "$file" ] || { echo "::error::Missing: $file"; status=1; continue; }
+            name=$(basename "$file" .txt)
+            work="webtoon_out/$name"
+            mkdir -p "$work"
+            # Optional first line: "#webtoon: --lang ja --max-panels 40"
+            opts=()
+            first=$(head -n 1 "$file")
+            if [[ "$first" == "#webtoon:"* ]]; then
+              read -r -a opts <<< "${first#\#webtoon:}"
+              tail -n +2 "$file" > "$work/chapter.txt"
+            else
+              cp "$file" "$work/chapter.txt"
+            fi
+            allowed=()
+            i=0
+            while [ $i -lt ${#opts[@]} ]; do
+              case "${opts[$i]}" in
+                --lang|--max-panels) allowed+=("${opts[$i]}" "${opts[$((i+1))]}"); i=$((i+2));;
+                --no-letter) allowed+=("--no-letter"); i=$((i+1));;
+                *) echo "::warning::Ignoring option ${opts[$i]}"; i=$((i+1));;
+              esac
+            done
+            echo "::group::$file ${allowed[*]}"
+            python "$SCRIPTS/webtoon.py" "$work/chapter.txt" --out "$work" "${allowed[@]}" || status=$?
+            echo "::endgroup::"
+          done < chapters.list
+          exit $status
+
+      - name: Upload webtoons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webtoons-${{ github.run_number }}
+          path: |
+            webtoon_out/*/comic_plan.json
+            webtoon_out/*/output/webtoon.png
+            webtoon_out/*/output/webtoon_slices/
+            webtoon_out/*/output/refs/
+            webtoon_out/*/output/panels/
+            webtoon_out/*/output/manifest.json
+          if-no-files-found: ignore
+          retention-days: 30

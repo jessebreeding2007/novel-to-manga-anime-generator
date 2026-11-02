@@ -102,6 +102,8 @@ Then continue with `references/comic.md` or `references/anime.md`.
 4. Regenerate rejects with `--only <id> --force`.
 5. Never write the API key into plan files, scripts or anything shared.
 
+**Fully automatic webtoon**: when the user wants no review steps at all, `python scripts/webtoon.py chapter.txt` (needs `ANTHROPIC_API_KEY` and `ARK_API_KEY`) plans, generates and stitches a lettered vertical strip in one run. See the README.
+
 If the user has no API access, or the agent can't run Python with internet access (e.g. a sandbox without network), use subscription mode.
 
 ## QA (both formats)
